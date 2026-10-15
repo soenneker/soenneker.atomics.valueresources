@@ -1,0 +1,85 @@
+name: publish-package
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - 'test/**'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  packages: write
+
+env:
+  PipelineEnvironment: true
+  NUGET_XMLDOC_MODE: skip
+
+jobs:
+  publish-package:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Setting up build version
+        shell: bash
+        run: |
+          echo "BUILD_VERSION=4.0.${GITHUB_RUN_NUMBER}" >> "$GITHUB_ENV"
+
+      - name: Get release notes from latest commit
+        uses: soenneker/release-notes-from-commits@v2
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Restore tests
+        run: dotnet restore test/Soenneker.Atomics.ValueResources.Tests/Soenneker.Atomics.ValueResources.Tests.csproj --verbosity minimal
+
+      - name: Build tests
+        run: dotnet build test/Soenneker.Atomics.ValueResources.Tests/Soenneker.Atomics.ValueResources.Tests.csproj --configuration Release --no-restore --verbosity minimal
+
+      - name: Test
+        run: dotnet test --project test/Soenneker.Atomics.ValueResources.Tests/Soenneker.Atomics.ValueResources.Tests.csproj --configuration Release --no-build --no-restore --verbosity normal
+
+      - name: Pack
+        shell: bash
+        run: |
+          mkdir -p artifacts
+          dotnet pack src/Soenneker.Atomics.ValueResources/Soenneker.Atomics.ValueResources.csproj \
+            --configuration Release \
+            --no-build \
+            --no-restore \
+            --output ./artifacts
+
+      - name: Publish to NuGet
+        uses: soenneker/nuget-resilient-publish@v4
+        with:
+          api-key: ${{ secrets.nuget__token }}
+          packages: 'artifacts/*.nupkg'
+
+      - name: Publish to GitHub Packages
+        shell: bash
+        run: |
+          dotnet nuget push ./artifacts/*.nupkg \
+            --source "https://nuget.pkg.github.com/soenneker/index.json" \
+            --api-key "${{ secrets.GH__TOKEN }}" \
+            --skip-duplicate
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GH__TOKEN }}
+        shell: bash
+        run: |
+          gh release create "v$BUILD_VERSION" \
+            --title "v$BUILD_VERSION" \
+            --notes "$PACKAGE_RELEASE_NOTES"
